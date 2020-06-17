@@ -3,7 +3,7 @@ require 'csv'
 module ActiveAdminImport
   class Importer
     attr_reader :resource, :options, :result, :model
-    attr_accessor :csv_lines, :headers
+    attr_accessor :csv_rows
 
     OPTIONS = [
       :validate,
@@ -15,7 +15,6 @@ module ActiveAdminImport
       :after_import,
       :before_batch_import,
       :after_batch_import,
-      :headers_rewrites,
       :batch_size,
       :batch_transaction,
       :csv_options
@@ -24,7 +23,6 @@ module ActiveAdminImport
     def initialize(resource, model, options)
       @resource = resource
       @model = model
-      @headers = model.respond_to?(:csv_headers) ? model.csv_headers : []
       assign_options(options)
     end
 
@@ -36,9 +34,9 @@ module ActiveAdminImport
       @model.file
     end
 
-    def cycle(lines)
-      @csv_lines = CSV.parse(lines.join, @csv_options)
-      import_result.add(batch_import, lines.count)
+    def cycle(rows)
+      @csv_rows = rows
+      import_result.add(batch_import, rows.count)
     end
 
     def import
@@ -62,76 +60,30 @@ module ActiveAdminImport
     end
 
     def batch_replace(header_key, options)
-      index = header_index(header_key)
-      csv_lines.map! do |line|
-        from = line[index]
-        line[index] = options[from] if options.key?(from)
-        line
+      # TODO test me this is just a guess
+      # index = header_index(header_key)
+      @csv_rows.map! do |row|
+        from = row[header_key]
+        row[header_key] = options[from] if options.key?(from)
+        row
       end
-    end
-
-    # Use this method when CSV file contains unnecessary columns
-    #
-    # Example:
-    #
-    # ActiveAdmin.register Post
-    #   active_admin_import before_batch_import: lambda { |importer|
-    #                         importer.batch_slice_columns(['name', 'birthday'])
-    #                       }
-    # end
-    #
-    def batch_slice_columns(slice_columns)
-      # Only set @use_indexes for the first batch so that @use_indexes are in correct
-      # position for subsequent batches
-      unless defined?(@use_indexes)
-        @use_indexes = []
-        headers.values.each_with_index do |val, index|
-          @use_indexes << index if val.in?(slice_columns)
-        end
-        return csv_lines if @use_indexes.empty?
-
-        # slice CSV headers
-        @headers = headers.to_a.values_at(*@use_indexes).to_h
-      end
-
-      # slice CSV values
-      csv_lines.map! do |line|
-        line.values_at(*@use_indexes)
-      end
-    end
-
-    def values_at(header_key)
-      csv_lines.collect { |line| line[header_index(header_key)] }.uniq
-    end
-
-    def header_index(header_key)
-      headers.values.index(header_key)
     end
 
     protected
 
     def process_file
-      lines = []
+      rows = []
       batch_size = options[:batch_size].to_i
-      File.open(file.path) do |f|
-        # capture headers if not exist
-        prepare_headers { CSV.parse(f.readline, @csv_options).first }
-        f.each_line do |line|
-          lines << line if line.present?
-          if lines.size == batch_size || f.eof?
-            cycle(lines)
-            lines = []
-          end
+
+      CSV::foreach(File.open(file.path), @csv_options) do |row|
+        rows << row unless row.blank? #blank line maybe?
+        if rows.size == batch_size
+          cycle(rows)
+          rows = []
         end
       end
-      cycle(lines) unless lines.blank?
-    end
-
-    def prepare_headers
-      headers = self.headers.present? ? self.headers.map(&:to_s) : yield
-      @headers = Hash[headers.zip(headers.map { |el| el.underscore.gsub(/\s+/, '_') })].with_indifferent_access
-      @headers.merge!(options[:headers_rewrites].symbolize_keys.slice(*@headers.symbolize_keys.keys))
-      @headers
+      # get the last batch that is smaller than batch_size
+      cycle(rows) unless rows.blank?
     end
 
     def run_callback(name)
@@ -140,9 +92,11 @@ module ActiveAdminImport
 
     def batch_import
       batch_result = nil
+
       @resource.transaction do
         run_callback(:before_batch_import)
-        batch_result = resource.import(headers.values, csv_lines, import_options)
+        batch_result = resource.import(@csv_rows.map{ |r| r.to_h.with_indifferent_access },
+                                       import_options)
         raise ActiveRecord::Rollback if import_options[:batch_transaction] && batch_result.failed_instances.any?
         run_callback(:after_batch_import)
       end
@@ -152,17 +106,23 @@ module ActiveAdminImport
     def assign_options(options)
       @options = {
         batch_size: 1000,
-        validate_uniqueness: true
-      }.merge(options.slice(*OPTIONS))
+        validate_uniqueness: true,
+     }.merge(options.slice(*OPTIONS))
       detect_csv_options
     end
 
     def detect_csv_options
-      @csv_options = if model.respond_to?(:csv_options)
-                       model.csv_options
-                     else
-                       options[:csv_options] || {}
-                     end.reject { |_, value| value.nil? || value == "" }
+      # see active_admin_import/lib/active_admin_import/model.rb:8
+      # for definition of :underscore - :downcase and :symbol are built in
+      default_csv_options = {header_converters: [:underscore, :downcase, :symbol],
+                             headers: true}
+
+      given_csv_options = if model.respond_to?(:csv_options)
+                            model.csv_options
+                          else
+                            options[:csv_options]
+                          end
+      @csv_options = default_csv_options.merge(given_csv_options).reject { |_, value| value.nil? || value == "" }
     end
   end
 end

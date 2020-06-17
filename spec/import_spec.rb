@@ -65,29 +65,14 @@ describe 'import', type: :feature do
         end
       end
 
-      context 'no headers' do
-        before do
-          add_post_resource(template_object: ActiveAdminImport::Model.new(author_id: author.id,
-                                                                          csv_headers: [:title, :body, :author_id]),
-                            validate: true,
-                            before_batch_import: lambda do |importer|
-                              importer.csv_lines.map! { |row| row << importer.model.author_id }
-                            end
-                           )
-
-          visit '/admin/posts/import'
-          upload_file!(:posts_for_author_no_headers)
-        end
-        include_examples 'successful inserts for author'
-      end
-
       context 'with headers' do
         before do
           add_post_resource(template_object: ActiveAdminImport::Model.new(author_id: author.id),
                             validate: true,
                             before_batch_import: lambda do |importer|
-                              importer.csv_lines.map! { |row| row << importer.model.author_id }
-                              importer.headers.merge!(:'Author Id' => :author_id)
+                              importer.csv_rows.each do |row|
+                                row[:author_id] = importer.model.author_id
+                              end
                             end
                            )
 
@@ -95,37 +80,6 @@ describe 'import', type: :feature do
           upload_file!(:posts_for_author)
         end
         include_examples 'successful inserts for author'
-      end
-    end
-
-    context 'for csv with author name' do
-      before do
-        add_post_resource(
-          validate: true,
-          template_object: ActiveAdminImport::Model.new,
-          headers_rewrites: { :'Author Name' => :author_id },
-          before_batch_import: lambda do |importer|
-            authors_names = importer.values_at(:author_id)
-            # replacing author name with author id
-            authors = Author.where(name: authors_names).pluck(:name, :id)
-            # {"Jane" => 2, "John" => 1}
-            options = Hash[*authors.flatten]
-            importer.batch_replace(:author_id, options)
-          end
-        )
-        visit '/admin/posts/import'
-        upload_file!(:posts)
-      end
-
-      it 'should resolve author_id by author name' do
-        Post.all.each do |post|
-          expect(Author.where(id: post.author.id)).to be_present
-        end
-      end
-
-      it 'should be imported' do
-        expect(Post.count).to eq(2)
-        expect(page).to have_content 'Successfully imported 2 posts'
       end
     end
   end
@@ -155,35 +109,6 @@ describe 'import', type: :feature do
     it 'should display notice from custom block' do
       upload_file!(:author)
       expect(page).to have_content 'some custom message'
-    end
-  end
-
-  context 'authors already exist' do
-    before do
-      Author.create!(id: 1, name: 'Jane', last_name: 'Roe')
-      Author.create!(id: 2, name: 'John', last_name: 'Doe')
-    end
-
-    context 'having authors with the same Id' do
-      before do
-        add_author_resource(
-          before_batch_import: lambda do |importer|
-            Author.where(id: importer.values_at('id')).delete_all
-          end
-        )
-        visit '/admin/authors/import'
-        upload_file!(:authors_with_ids)
-      end
-
-      it 'should replace authors' do
-        expect(page).to have_content 'Successfully imported 2 authors'
-        expect(Author.count).to eq(2)
-      end
-
-      it 'should replace authors by id' do
-        expect(Author.find(1).name).to eq('John')
-        expect(Author.find(2).name).to eq('Jane')
-      end
     end
   end
 
@@ -276,10 +201,10 @@ describe 'import', type: :feature do
             { template_object: ActiveAdminImport::Model.new(attributes) }
           end
 
-          it 'should import file' do
+          it 'should fail to import file' do
             upload_file!(:authors_no_headers)
-            expect(page).to have_content 'Successfully imported 2 authors'
-            expect(Author.count).to eq(2)
+            expect(page).to have_content 'can\'t write unknown attribute `john`'
+            expect(Author.count).to eq(0)
           end
         end
 
@@ -373,18 +298,6 @@ describe 'import', type: :feature do
         end
       end
 
-      context 'with different header attribute names' do
-        let(:options) do
-          { headers_rewrites: { :'Second name' => :last_name } }
-        end
-
-        it 'should import file' do
-          upload_file!(:author_broken_header)
-          expect(page).to have_content 'Successfully imported 1 author'
-          expect(Author.count).to eq(1)
-        end
-      end
-
       context 'with semicolons separator' do
         let(:options) do
           attributes = { csv_options: { col_sep: ';' } }
@@ -455,55 +368,6 @@ describe 'import', type: :feature do
     end
   end
 
-  context "with slice_columns option" do
-    let(:batch_size) { 2 }
-
-    before do
-      add_author_resource template_object: ActiveAdminImport::Model.new,
-                          before_batch_import: lambda { |importer|
-                            importer.batch_slice_columns(slice_columns)
-                          },
-                          batch_size: batch_size
-      visit "/admin/authors/import"
-      upload_file!(:authors)
-    end
-
-    context "slice last column and superfluous column" do
-      let(:slice_columns) { %w(name last_name not_existing_column) }
-
-      shared_examples_for "birthday column removed" do
-        it "should not fill `birthday` column" do
-          expect(Author.pluck(:name, :last_name, :birthday)).to match_array(
-            [
-              ["Jane", "Roe", nil],
-              ["John", "Doe", nil]
-            ]
-          )
-        end
-      end
-
-      it_behaves_like "birthday column removed"
-
-      context "when doing more than one batch" do
-        let(:batch_size) { 1 }
-
-        it_behaves_like "birthday column removed"
-      end
-    end
-
-    context "slice column from the middle" do
-      let(:slice_columns) { %w(name birthday) }
-
-      it "should not fill `last_name` column" do
-        expect(Author.pluck(:name, :last_name, :birthday)).to match_array(
-          [
-            ["Jane", nil, "1988-11-16".to_date],
-            ["John", nil, "1986-05-01".to_date]
-          ]
-        )
-      end
-    end
-  end
 
   context 'with invalid options' do
     let(:options) { { invalid_option: :invalid_value } }

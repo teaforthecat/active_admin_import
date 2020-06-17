@@ -4,6 +4,9 @@
 require 'rchardet'
 require 'zip'
 
+# assuming we are in Rails so underscore should be available
+CSV::HeaderConverters[:underscore] = lambda { |h| h.underscore }
+
 module ActiveAdminImport
   class Model
     include ActiveModel::Model
